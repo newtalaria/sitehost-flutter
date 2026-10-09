@@ -1,0 +1,30 @@
+name: Prepare Flutter web release
+description: Cache-bust flutter_bootstrap.js and remove service workers and source maps from the build.
+author: Talaria
+branding:
+  icon: package
+  color: blue
+inputs:
+  package_path:
+    description: Flutter package directory, relative to the caller repository.
+    required: true
+    default: "."
+  deploy_sha:
+    description: 40 character git commit used as the cache-bust value.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Prepare
+      shell: bash
+      env:
+        PACKAGE_PATH: ${{ inputs.package_path }}
+        DEPLOY_SHA: ${{ inputs.deploy_sha }}
+      run: |
+        set -euo pipefail
+        root="${GITHUB_WORKSPACE:-$(pwd)}"
+        case "$PACKAGE_PATH" in
+          /*) export BUILD_DIR="${PACKAGE_PATH}/build/web" ;;
+          *) export BUILD_DIR="${root}/${PACKAGE_PATH}/build/web" ;;
+        esac
+        bash "$GITHUB_ACTION_PATH/prepare-release.sh"

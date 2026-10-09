@@ -1,0 +1,458 @@
+# Build a Flutter web app and publish it to a SiteHost container.
+#
+# Called by the app repository. See README.md for secrets, variables, and the caller.
+
+name: Deploy Flutter to SiteHost
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: GitHub environment name for this container.
+        type: string
+        required: true
+      emergency_override:
+        description: Deploy a ref that is not main or a tag when require_main_or_tag is set.
+        type: boolean
+        required: false
+        default: false
+      require_main_or_tag:
+        description: Fail unless this run is from main or a tag.
+        type: boolean
+        required: false
+        default: false
+      web_renderer:
+        description: wasm compiles Wasm and JavaScript. javascript compiles JavaScript only.
+        type: string
+        required: false
+        default: wasm
+      flutter_version:
+        description: Flutter SDK version to install on the runner.
+        type: string
+        required: false
+        default: "3.47.5"
+      package_path:
+        description: Flutter package directory, relative to the repository root.
+        type: string
+        required: false
+        default: "."
+      pub_get_path:
+        description: Directory for flutter pub get. The workspace root for a workspace package.
+        type: string
+        required: false
+        default: "."
+      base_href:
+        description: Flutter --base-href. Must start and end with /.
+        type: string
+        required: false
+        default: /
+      pwa_strategy:
+        description: Flutter --pwa-strategy.
+        type: string
+        required: false
+        default: none
+      upload_source_maps:
+        description: Build JavaScript source maps, upload them, and omit them from the published tree.
+        type: boolean
+        required: false
+        default: false
+      keep_releases:
+        description: How many git sha release directories to retain.
+        type: string
+        required: false
+        default: "5"
+      test_rollback:
+        description: Fail after a successful deploy so the previous release is restored.
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      SITEHOST_SSH_PRIVATE_KEY:
+        description: Actions login key for the container SSH user.
+        required: false
+      FLUTTER_DART_DEFINES:
+        description: JSON object of compile-time dart defines. Overrides keys in the package define file.
+        required: false
+      TALARIA_RELEASE_KEY:
+        description: Talaria key with releases:write. Used when upload_source_maps is true.
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sitehost-flutter-${{ github.repository }}-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate inputs
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          WEB_RENDERER: ${{ inputs.web_renderer }}
+          FLUTTER_VERSION: ${{ inputs.flutter_version }}
+          PACKAGE_PATH: ${{ inputs.package_path }}
+          PUB_GET_PATH: ${{ inputs.pub_get_path }}
+          BASE_HREF: ${{ inputs.base_href }}
+          PWA_STRATEGY: ${{ inputs.pwa_strategy }}
+          KEEP_RELEASES: ${{ inputs.keep_releases }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$ENVIRONMENT" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$ ]]; then
+            echo "environment must match [A-Za-z0-9][A-Za-z0-9_.-]{0,62}." >&2
+            exit 1
+          fi
+          if [[ "$WEB_RENDERER" != "wasm" && "$WEB_RENDERER" != "javascript" ]]; then
+            echo "web_renderer must be wasm or javascript." >&2
+            exit 1
+          fi
+          if [[ ! "$FLUTTER_VERSION" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
+            echo "flutter_version must be a Flutter version such as 3.47.5." >&2
+            exit 1
+          fi
+          if [[ ! "$KEEP_RELEASES" =~ ^[0-9]+$ || "$KEEP_RELEASES" -lt 1 ]]; then
+            echo "keep_releases must be a positive whole number." >&2
+            exit 1
+          fi
+          if [[ "$BASE_HREF" != /* || "$BASE_HREF" != */ ]]; then
+            echo "base_href must start and end with /." >&2
+            exit 1
+          fi
+          if [[ ! "$PWA_STRATEGY" =~ ^[a-z0-9-]+$ ]]; then
+            echo "pwa_strategy must be a Flutter pwa strategy such as none." >&2
+            exit 1
+          fi
+          assert_relative() {
+            local label="$1"
+            local value="$2"
+            case "$value" in
+              /*|*..*|*$'\n'*|*' '*)
+                echo "${label} must be a relative path without spaces or .." >&2
+                exit 1
+                ;;
+            esac
+          }
+          assert_relative "package_path" "$PACKAGE_PATH"
+          assert_relative "pub_get_path" "$PUB_GET_PATH"
+
+      - name: Restrict protected refs
+        if: inputs.require_main_or_tag && inputs.emergency_override != true
+        env:
+          REF: ${{ github.ref }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          if [[ "$REF_TYPE" != "tag" && "$REF" != "refs/heads/main" ]]; then
+            echo "This environment only deploys from main or a tag." >&2
+            echo "Re-run with emergency override to deploy this ref." >&2
+            exit 1
+          fi
+
+  deploy:
+    needs: guard
+    if: always() && needs.guard.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: ${{ inputs.environment }}
+    env:
+      SITEHOST_APP_PATH: ${{ vars.SITEHOST_APP_PATH || '/container/application' }}
+      DEPLOY_ENVIRONMENT: ${{ inputs.environment }}
+      DEPLOY_SHA: ${{ github.sha }}
+      SITEHOST_SITE_URL: ${{ vars.SITEHOST_SITE_URL }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Normalize configuration
+        env:
+          SITEHOST_SSH_PORT_RAW: ${{ vars.SITEHOST_SSH_PORT }}
+          SITEHOST_SSH_HOST_RAW: ${{ vars.SITEHOST_SSH_HOST }}
+          SITEHOST_SSH_USER_RAW: ${{ vars.SITEHOST_SSH_USER }}
+          SITEHOST_SSH_HOST_FINGERPRINT_RAW: ${{ vars.SITEHOST_SSH_HOST_FINGERPRINT }}
+          SITEHOST_SSH_PRIVATE_KEY_RAW: ${{ secrets.SITEHOST_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          trim() {
+            printf '%s' "$1" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+          }
+          trim_block() {
+            local value="$1"
+            value="${value//$'\r'/}"
+            value="${value#"${value%%[![:space:]]*}"}"
+            value="${value%"${value##*[![:space:]]}"}"
+            printf '%s' "$value"
+          }
+          mask_block() {
+            local value="$1"
+            local line
+            [[ -z "$value" ]] && return 0
+            while IFS= read -r line || [[ -n "$line" ]]; do
+              if ((${#line} >= 8)); then
+                echo "::add-mask::${line}"
+              fi
+            done <<< "$value"
+          }
+          write_block() {
+            local name="$1"
+            local value="$2"
+            local delim="SITEHOST_EOF_${RANDOM}${RANDOM}"
+            {
+              printf '%s<<%s\n' "$name" "$delim"
+              if [[ -n "$value" ]]; then
+                printf '%s\n' "$value"
+                printf '\n'
+              fi
+              printf '%s\n' "$delim"
+            } >> "$GITHUB_ENV"
+          }
+          port="$(trim "${SITEHOST_SSH_PORT_RAW:-}")"
+          if [[ -z "$port" ]]; then
+            port=22
+          fi
+          if [[ ! "$port" =~ ^[0-9]+$ ]]; then
+            echo "SITEHOST_SSH_PORT must be a whole number." >&2
+            exit 1
+          fi
+          app_path="$(trim "${SITEHOST_APP_PATH:-}")"
+          if [[ -z "$app_path" ]]; then
+            app_path=/container/application
+          fi
+          private_key="$(trim_block "${SITEHOST_SSH_PRIVATE_KEY_RAW:-}")"
+          mask_block "$private_key"
+          {
+            printf 'SITEHOST_SSH_PORT=%s\n' "$port"
+            printf 'SITEHOST_SSH_HOST=%s\n' "$(trim "${SITEHOST_SSH_HOST_RAW:-}")"
+            printf 'SITEHOST_SSH_USER=%s\n' "$(trim "${SITEHOST_SSH_USER_RAW:-}")"
+            printf 'SITEHOST_SSH_HOST_FINGERPRINT=%s\n' "$(trim "${SITEHOST_SSH_HOST_FINGERPRINT_RAW:-}")"
+            printf 'SITEHOST_APP_PATH=%s\n' "$app_path"
+            printf 'SITEHOST_SITE_URL=%s\n' "$(trim "${SITEHOST_SITE_URL:-}")"
+          } >> "$GITHUB_ENV"
+          if [[ -n "$private_key" ]]; then
+            write_block SITEHOST_SSH_PRIVATE_KEY "$private_key"
+          else
+            write_block SITEHOST_SSH_PRIVATE_KEY ""
+          fi
+
+      - name: Check required configuration
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in \
+            SITEHOST_SSH_PRIVATE_KEY \
+            SITEHOST_SSH_HOST \
+            SITEHOST_SSH_USER \
+            SITEHOST_SSH_HOST_FINGERPRINT \
+            SITEHOST_APP_PATH \
+            SITEHOST_SITE_URL \
+            DEPLOY_SHA
+          do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Missing ${name}. Set it on the ${DEPLOY_ENVIRONMENT} environment, the repository, or the organisation." >&2
+              missing=1
+            fi
+          done
+          if [[ "$missing" -ne 0 ]]; then
+            exit 1
+          fi
+
+      - name: Resolve release name
+        id: release
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$REF_NAME" || "$REF_NAME" == *$'\n'* || "$REF_NAME" == *'"'* || "$REF_NAME" == *"'"* || "$REF_NAME" == *'#'* ]]; then
+            echo "The git ref cannot be used in APP_RELEASE." >&2
+            exit 1
+          fi
+          if [[ ! "$DEPLOY_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "DEPLOY_SHA must be a 40 character git commit." >&2
+            exit 1
+          fi
+          short="${DEPLOY_SHA:0:7}"
+          value="${REF_NAME}@${short}"
+          {
+            echo "value<<RELEASE_EOF"
+            printf '%s\n' "$value"
+            echo "RELEASE_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: ${{ inputs.flutter_version }}
+          cache: true
+
+      - name: Build Flutter web
+        uses: ./actions/build
+        env:
+          FLUTTER_DART_DEFINES: ${{ secrets.FLUTTER_DART_DEFINES }}
+          APP_RELEASE: ${{ steps.release.outputs.value }}
+          SOURCE_MAPS: ${{ inputs.upload_source_maps && 'true' || 'false' }}
+        with:
+          package_path: ${{ inputs.package_path }}
+          pub_get_path: ${{ inputs.pub_get_path }}
+          web_renderer: ${{ inputs.web_renderer }}
+          base_href: ${{ inputs.base_href }}
+          pwa_strategy: ${{ inputs.pwa_strategy }}
+
+      - name: Collect JavaScript source maps
+        if: inputs.upload_source_maps
+        env:
+          PACKAGE_PATH: ${{ inputs.package_path }}
+        run: |
+          set -euo pipefail
+          src="${GITHUB_WORKSPACE}/${PACKAGE_PATH}/build/web"
+          dest="${GITHUB_WORKSPACE}/source-maps"
+          mkdir -p "$dest"
+          find "$src" -type f -name '*.js.map' -exec cp {} "$dest/" \;
+          count="$(find "$dest" -type f -name '*.js.map' | wc -l | tr -d ' ')"
+          if [[ "$count" -eq 0 ]]; then
+            echo "No JavaScript source maps were built. The Wasm .wasm.map files are not uploaded." >&2
+            exit 1
+          fi
+
+      - name: Check source map key
+        if: inputs.upload_source_maps
+        env:
+          TALARIA_RELEASE_KEY: ${{ secrets.TALARIA_RELEASE_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$TALARIA_RELEASE_KEY" ]]; then
+            echo "TALARIA_RELEASE_KEY is not set for the ${DEPLOY_ENVIRONMENT} environment." >&2
+            echo "Set a releases:write key as a secret on that environment, the repository, or the organisation." >&2
+            exit 1
+          fi
+
+      - name: Upload source maps
+        if: inputs.upload_source_maps
+        uses: newtalaria/source-maps@v1
+        with:
+          path: source-maps
+          release: ${{ steps.release.outputs.value }}
+        env:
+          TALARIA_RELEASE_KEY: ${{ secrets.TALARIA_RELEASE_KEY }}
+
+      - name: Prepare release
+        uses: ./actions/prepare
+        with:
+          package_path: ${{ inputs.package_path }}
+          deploy_sha: ${{ github.sha }}
+
+      - name: Install Flutter web hosting
+        uses: ./actions/ssh
+        with:
+          script: remote-install.sh
+          command_timeout: 5m
+          env_names: SITEHOST_APP_PATH
+
+      - name: Upload release
+        uses: ./actions/upload
+        with:
+          package_path: ${{ inputs.package_path }}
+
+      - name: Publish release
+        id: publish
+        uses: ./actions/ssh
+        env:
+          PUBLISH_ACTION: publish
+        with:
+          script: remote-publish.sh
+          command_timeout: 5m
+          env_names: SITEHOST_APP_PATH DEPLOY_SHA PUBLISH_ACTION
+
+      - name: Smoke check
+        id: smoke
+        env:
+          WEB_RENDERER: ${{ inputs.web_renderer }}
+        run: |
+          set -euo pipefail
+          case "$SITEHOST_SITE_URL" in
+            https://*|http://*) ;;
+            *)
+              echo "SITEHOST_SITE_URL must start with http:// or https://" >&2
+              exit 1
+              ;;
+          esac
+          base="${SITEHOST_SITE_URL%/}"
+          fetch() {
+            curl --fail --silent --show-error --location \
+              --retry 8 --retry-delay 5 --retry-connrefused --retry-all-errors \
+              --max-time 30 "$@"
+          }
+          body="$(mktemp)"
+          fetch --output "$body" "${base}/"
+          fetch --output "$body" "${base}/issues/smoke"
+          if ! grep -q 'flutter_bootstrap.js' "$body"; then
+            echo "Deep link did not return the Flutter app." >&2
+            exit 1
+          fi
+          js_type="$(fetch --head --output /dev/null --write-out '%{content_type}' "${base}/main.dart.js")"
+          case "$js_type" in
+            application/javascript*|text/javascript*) ;;
+            *)
+              echo "main.dart.js Content-Type is ${js_type}" >&2
+              exit 1
+              ;;
+          esac
+          if [[ "$WEB_RENDERER" == "wasm" ]]; then
+            wasm_type="$(fetch --head --output /dev/null --write-out '%{content_type}' "${base}/main.dart.wasm")"
+            mjs_type="$(fetch --head --output /dev/null --write-out '%{content_type}' "${base}/main.dart.mjs")"
+            case "$wasm_type" in
+              application/wasm*) ;;
+              *)
+                echo "main.dart.wasm Content-Type is ${wasm_type}" >&2
+                exit 1
+                ;;
+            esac
+            case "$mjs_type" in
+              application/javascript*|text/javascript*) ;;
+              *)
+                echo "main.dart.mjs Content-Type is ${mjs_type}" >&2
+                exit 1
+                ;;
+            esac
+            headers="$(fetch --head --output /dev/null --dump-header - "${base}/" )"
+            if ! printf '%s\n' "$headers" | grep -qi '^cross-origin-opener-policy:[[:space:]]*same-origin'; then
+              echo "Missing Cross-Origin-Opener-Policy: same-origin" >&2
+              exit 1
+            fi
+            if ! printf '%s\n' "$headers" | grep -qi '^cross-origin-embedder-policy:[[:space:]]*credentialless'; then
+              echo "Missing Cross-Origin-Embedder-Policy: credentialless" >&2
+              exit 1
+            fi
+          fi
+
+      - name: Fail for rollback test
+        id: test-rollback
+        if: success() && inputs.test_rollback
+        run: |
+          echo "Test rollback is on. The deploy finished, and this step fails so the previous release is restored."
+          exit 1
+
+      - name: Prune old releases
+        if: success()
+        uses: ./actions/ssh
+        env:
+          PUBLISH_ACTION: prune
+          KEEP_RELEASES: ${{ inputs.keep_releases }}
+        with:
+          script: remote-publish.sh
+          command_timeout: 5m
+          env_names: SITEHOST_APP_PATH PUBLISH_ACTION KEEP_RELEASES
+
+      - name: Restore previous release
+        if: >-
+          failure() &&
+          steps.publish.outcome == 'success' &&
+          (steps.smoke.outcome == 'failure' || steps.test-rollback.outcome == 'failure')
+        uses: ./actions/ssh
+        env:
+          PUBLISH_ACTION: rollback
+        with:
+          script: remote-publish.sh
+          command_timeout: 5m
+          env_names: SITEHOST_APP_PATH PUBLISH_ACTION

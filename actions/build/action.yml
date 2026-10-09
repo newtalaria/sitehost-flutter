@@ -1,0 +1,39 @@
+name: Build Flutter web
+description: Compile a Flutter web app on the runner for a SiteHost deploy.
+author: Talaria
+branding:
+  icon: package
+  color: blue
+inputs:
+  package_path:
+    description: Flutter package directory, relative to the caller repository.
+    required: true
+    default: "."
+  pub_get_path:
+    description: Directory where flutter pub get runs. Use the workspace root for a workspace package.
+    required: true
+    default: "."
+  web_renderer:
+    description: wasm compiles Wasm and JavaScript. javascript compiles JavaScript only.
+    required: true
+    default: wasm
+  base_href:
+    description: Flutter --base-href. Must start and end with /.
+    required: true
+    default: /
+  pwa_strategy:
+    description: Flutter --pwa-strategy.
+    required: true
+    default: none
+runs:
+  using: composite
+  steps:
+    - name: Build
+      shell: bash
+      env:
+        PACKAGE_PATH: ${{ inputs.package_path }}
+        PUB_GET_PATH: ${{ inputs.pub_get_path }}
+        WEB_RENDERER: ${{ inputs.web_renderer }}
+        BASE_HREF: ${{ inputs.base_href }}
+        PWA_STRATEGY: ${{ inputs.pwa_strategy }}
+      run: bash "$GITHUB_ACTION_PATH/build-web.sh"
