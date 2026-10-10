@@ -186,9 +186,20 @@ reload_nginx() {
     echo "nginx is not on PATH, so the new config was not reloaded." >&2
     return 1
   fi
-  if ! "$bin" -t; then
-    echo "nginx -t failed. The previous config was restored." >&2
-    return 1
+  local test_out test_status
+  set +e
+  test_out="$("$bin" -t 2>&1)"
+  test_status=$?
+  set -e
+  printf '%s\n' "$test_out"
+  if [[ "$test_status" -ne 0 ]]; then
+    # syntax is ok, then nginx tries to create the pid file. The container
+    # user cannot write /run/nginx.pid, so -t exits even when the config is valid.
+    if ! printf '%s\n' "$test_out" | grep -q 'syntax is ok' \
+      || ! printf '%s\n' "$test_out" | grep -Eq 'nginx\.pid" failed'; then
+      echo "nginx -t failed. The previous config was restored." >&2
+      return 1
+    fi
   fi
   if "$bin" -s reload; then
     return 0

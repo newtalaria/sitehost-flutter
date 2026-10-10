@@ -106,4 +106,46 @@ if [[ -e "${fail_dir}/nginx/sites-enabled/default" ]]; then
   exit 1
 fi
 
+pid_dir="${tmp}/pid-case"
+prepare_tree "$pid_dir"
+bin_dir="${tmp}/bin"
+mkdir -p "$bin_dir"
+cat > "${bin_dir}/nginx" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-t" ]]; then
+  echo "nginx: the configuration file /etc/nginx/nginx.conf syntax is ok" >&2
+  echo 'open() "/run/nginx.pid" failed (13: Permission denied)' >&2
+  echo "nginx: configuration file /etc/nginx/nginx.conf test failed" >&2
+  exit 1
+fi
+exit 1
+EOF
+cat > "${bin_dir}/supervisorctl" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "signal" && "\${2:-}" == "HUP" && "\${3:-}" == "nginx" ]]; then
+  touch "${tmp}/signalled"
+  echo "nginx: signalled"
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "${bin_dir}/nginx" "${bin_dir}/supervisorctl"
+PATH="${bin_dir}:${PATH}" \
+  SITEHOST_APP_PATH="${pid_dir}/application" \
+  NGINX_MIME_TYPES="${pid_dir}/nginx/mime.types" \
+  NGINX_SITE_FILE="${pid_dir}/nginx/sites-available/default" \
+  NGINX_SITE_ENABLED="${pid_dir}/nginx/sites-enabled/default" \
+  FLUTTER_NGINX_SITE_FILE="$site" \
+  NGINX_BIN="${bin_dir}/nginx" \
+  bash "$install" >"${tmp}/pid.out" 2>"${tmp}/pid.err"
+if [[ ! -f "${tmp}/signalled" ]]; then
+  echo "pid permission failure did not reload nginx through supervisor" >&2
+  cat "${tmp}/pid.out" "${tmp}/pid.err" >&2
+  exit 1
+fi
+if ! grep -q 'credentialless' "${pid_dir}/nginx/sites-available/default"; then
+  echo "pid permission failure restored the new site file" >&2
+  exit 1
+fi
+
 echo "install test passed"
