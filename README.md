@@ -90,12 +90,12 @@ The shared workflow queues deploys with group `sitehost-flutter-${{ github.repos
 1. Check out the app and compile `flutter build web` on the runner. `--pwa-strategy=none` is the default, because a leftover service worker has served a stale page after a deploy.
 2. SSH in and install hosting if it is missing or out of date: Wasm and `.mjs` MIME types, the SPA `try_files` rule, `Cross-Origin-Opener-Policy: same-origin`, and `Cross-Origin-Embedder-Policy: credentialless`. `credentialless` is what lets the page call another host, such as `api.newtalaria.com`. Then `nginx -t` and reload. A failed test restores the previous Nginx files. PHP is not restarted.
 3. Upload the build to `/container/application/releases/<sha>/`.
-4. Cache-bust `flutter_bootstrap.js?v=<short-sha>` and delete source maps and `flutter_service_worker.js` before the upload.
+4. Cache-bust `flutter_bootstrap.js?v=<short-sha>` and the `main.dart.js` / `main.dart.wasm` URLs it loads. Publish the icon font as `MaterialIcons-<short-sha>.otf` and point the compiled app at `Font-<short-sha>.json`, because a browser that stored `FontManifest.json` or `MaterialIcons-Regular.otf` as immutable will not ask again. Delete source maps and `flutter_service_worker.js` before the upload.
 5. Point `public` at that release. The first run moves an existing `public` directory to `releases/previous`.
 6. Request `SITEHOST_SITE_URL`, including `/issues/smoke`, and check Wasm content types and the isolation headers when the renderer is `wasm`.
 7. On smoke failure, point `public` back at the previous release.
 
-`index.html`, `flutter.js`, `flutter_bootstrap.js`, `main.dart.js`, `main.dart.wasm`, `main.dart.mjs`, `FontManifest.json`, and the unhashed icon font are `Cache-Control: no-cache`. A Cloudflare cache rule that marks `.otf` or `FontManifest.json` immutable will keep serving the old icon font. Do not add that rule. A Wasm binary cannot be patched to a longer font filename.
+`index.html`, `flutter.js`, `flutter_bootstrap.js`, `main.dart.js`, `main.dart.wasm`, `main.dart.mjs`, and `FontManifest.json` are `Cache-Control: no-cache`. The icon font filename changes every release because a browser that stored `MaterialIcons-Regular.otf` as immutable will not ask again. Do not add a Cloudflare cache rule that marks `FontManifest.json` immutable. A Wasm binary cannot be patched to a longer font filename; the font path lives in `FontManifest.json`, not in the Wasm binary.
 
 ## Inputs
 
