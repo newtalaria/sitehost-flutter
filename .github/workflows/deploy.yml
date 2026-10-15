@@ -61,6 +61,11 @@ on:
         type: string
         required: false
         default: "5"
+      stamp_script:
+        description: Optional script, relative to package_path, run as `<script> build/web` after the build (e.g. tool/stamp_build_sha.sh). Skipped when empty.
+        type: string
+        required: false
+        default: ""
       test_rollback:
         description: Fail after a successful deploy so the previous release is restored.
         type: boolean
@@ -298,6 +303,24 @@ jobs:
           web_renderer: ${{ inputs.web_renderer }}
           base_href: ${{ inputs.base_href }}
           pwa_strategy: ${{ inputs.pwa_strategy }}
+
+      - name: Stamp build
+        if: inputs.stamp_script != ''
+        env:
+          PACKAGE_PATH: ${{ inputs.package_path }}
+          STAMP_SCRIPT: ${{ inputs.stamp_script }}
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/${PACKAGE_PATH}"
+          if [[ "$STAMP_SCRIPT" == /* || "$STAMP_SCRIPT" == *..* ]]; then
+            echo "stamp_script must be a path inside package_path." >&2
+            exit 1
+          fi
+          if [[ ! -f "$STAMP_SCRIPT" ]]; then
+            echo "stamp_script not found: ${PACKAGE_PATH}/${STAMP_SCRIPT}" >&2
+            exit 1
+          fi
+          bash "$STAMP_SCRIPT" build/web
 
       - name: Collect JavaScript source maps
         if: inputs.upload_source_maps
