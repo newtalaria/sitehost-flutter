@@ -112,3 +112,4 @@ The shared workflow queues deploys with group `sitehost-flutter-${{ github.repos
 | `keep_releases` | `5` | Sha directories kept under `releases/`. |
 | `require_main_or_tag` | `false` | Fail unless the ref is `main` or a tag. |
 | `test_rollback` | `false` | Finish the deploy, then restore the previous release. |
+| `stamp_script` | `""` | Optional script, relative to `package_path`, run as `<script> build/web` after the build and before the release is prepared. Use it to write a build marker such as `build-sha.json` (e.g. `tool/stamp_build_sha.sh`). The script runs in the checked-out app repository, so `git rev-parse HEAD` works. |
